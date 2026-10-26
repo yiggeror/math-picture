@@ -2,9 +2,25 @@
   "fps": 60,
   "width": 1080,
   "height": 1920,
-  "climax": 33.0,
-  "wave": 1.5,
-  "end": 48.0,
+  "intro": 0.8,
+  "rounds": [
+    { "circles": 1, "seconds": 2.4 },
+    { "circles": 2, "seconds": 2.2 },
+    { "circles": 4, "seconds": 2.1 },
+    { "circles": 8, "seconds": 2.0 },
+    { "circles": 16, "seconds": 2.0 },
+    { "circles": 32, "seconds": 2.0 },
+    { "circles": 64, "seconds": 2.0 },
+    { "circles": 128, "seconds": 2.0 },
+    { "circles": 256, "seconds": 1.9 },
+    { "circles": 512, "seconds": 1.8 },
+    { "circles": 1024, "seconds": 1.6 },
+    { "circles": 2048, "seconds": 1.4 },
+    { "circles": 4096, "seconds": 1.2 },
+    { "circles": 8192, "seconds": 1.0 },
+    { "circles": 16384, "seconds": 7.0 }
+  ],
+  "after": 11.0,
   "fadeOut": 3.0,
   "bpm": 100
 }

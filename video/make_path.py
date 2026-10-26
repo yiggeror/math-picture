@@ -1,15 +1,15 @@
-"""Turn The Starry Night into one closed line, then into Fourier epicycles.
+"""Turn The Starry Night into one closed line, then into Fourier circles, round by round.
 
-painting -> brush-stroke flow field -> evenly spaced streamlines (one per "brush stroke")
-         -> strokes chained ring by ring outward from the central swirl into one closed line
-         -> arc-length resample -> FFT -> circles
-         -> oversampled reconstruction of the line the circles actually draw
+painting -> brush direction field -> long, evenly spaced streamlines that follow Van Gogh's strokes
+         -> chained (nearest end first, starting at the big swirl) into one closed line
+         -> arc-length resample -> FFT -> circles sorted largest first
+         -> for every round in config.json: the curve drawn by its first N circles
 
 Writes into data/:
-  meta.json   sizes, focus point, colour palette
-  terms.bin   circles, largest first: int32 freq[K], float32 amp[K], float32 phase[K]
-  trail.bin   float32 (x, y) of the pen, OVERSAMPLE points per sample
-  attr.bin    per trail point: uint8 pen_up, uint8 palette index
+  meta.json   sample count, rounds, oversampling of the last round, palette
+  terms.bin   int32 freq[K], float32 amp[K], float32 phase[K]   (K = most circles any round uses, +1)
+  trails.bin  float32 (x, y) per point; every round has SAMPLES points, the last round SAMPLES*FINAL_OVERSAMPLE
+  attr.bin    per sample: uint8 pen_up, uint8 palette index
 
 Usage: python3 make_path.py
 """
@@ -22,18 +22,18 @@ from PIL import Image, ImageFilter
 from scipy import ndimage as ndi
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+CFG = json.load(open(os.path.join(HERE, "config.json")))
 SRC = os.path.join(HERE, "assets/starry_night.jpg")
 OUT = os.path.join(HERE, "data")
 
-W = 1080                 # painting width in final-frame pixels
-FOCUS = (585.0, 300.0)   # centre of the big swirl; the drawing spirals out from here
-DSEP = 4.0               # spacing between neighbouring strokes
-LMAX = 60                # longest stroke
-TENSOR_SIGMA = 5         # smoothing of the brush direction field
-RING_GROWTH = 1.1        # each ring is 10% farther out than the last
-N_SAMPLES = 2 ** 18      # samples along the line
-N_TERMS = 2 ** 17        # circles kept, largest first
-OVERSAMPLE = 4           # extra trail points per sample, so close-ups stay smooth
+W = 1080                 # painting width in frame pixels
+FOCUS = (585.0, 300.0)   # centre of the big swirl; the line starts here
+DSEP = 12.0              # spacing between neighbouring streamlines
+LMAX = 500               # longest streamline
+MIN_POINTS = 25          # drop shorter scraps
+TENSOR_SIGMA = 7         # smoothing of the brush direction field
+SAMPLES = 2 ** 15
+FINAL_OVERSAMPLE = 4     # the last round is seen in close-up, so it gets a finer trail
 PALETTE = 64
 
 rng = np.random.default_rng(1)
@@ -41,8 +41,7 @@ rng = np.random.default_rng(1)
 
 def load():
     im = Image.open(SRC).convert("RGB")
-    h = round(im.height * W / im.width)
-    return im.resize((W, h), Image.LANCZOS)
+    return im.resize((W, round(im.height * W / im.width)), Image.LANCZOS)
 
 
 def direction_field(rgb):
@@ -56,7 +55,7 @@ def direction_field(rgb):
 
 
 def streamlines(dx, dy):
-    """Jobard–Lefer style: trace from random seeds, stop near ink already laid down."""
+    """Jobard–Lefer style: trace from random seeds, stop near lines already laid down."""
     h, w = dx.shape
     mask = np.zeros((h, w), bool)
     r_test = DSEP * 0.55
@@ -90,7 +89,7 @@ def streamlines(dx, dy):
         if not free(sx, sy):
             continue
         pts = trace(sx, sy, -1)[::-1] + [(sx, sy)] + trace(sx, sy, 1)
-        if len(pts) < 6:
+        if len(pts) < MIN_POINTS:
             continue
         lines.append(np.array(pts))
         for x, y in pts:
@@ -100,31 +99,24 @@ def streamlines(dx, dy):
     return lines
 
 
-def spiral_chain(lines):
-    """Grow the drawing outward from FOCUS ring by ring; inside a ring, always hop to the nearest stroke end.
-
-    Rings widen with distance (log-spaced), so the drawing grows at the same pace the camera pulls back."""
-    fx, fy = FOCUS
-    mids = np.array([l[len(l) // 2] for l in lines])
-    ring = np.floor(np.log1p(np.hypot(mids[:, 0] - fx, mids[:, 1] - fy) / 8) / np.log(RING_GROWTH)).astype(int)
+def chain(lines):
+    """One closed line: from the swirl, always continue with the nearest unused line end."""
     starts = np.array([l[0] for l in lines])
     ends = np.array([l[-1] for l in lines])
+    left = np.ones(len(lines), bool)
     path, pen_up = [], []
     cur = np.array(FOCUS)
-    for rg in np.unique(ring):
-        idx = np.flatnonzero(ring == rg)
-        left = np.ones(len(idx), bool)
-        for _ in range(len(idx)):
-            ds = np.where(left, np.hypot(*(starts[idx] - cur).T), np.inf)
-            de = np.where(left, np.hypot(*(ends[idx] - cur).T), np.inf)
-            k = int(np.argmin(np.minimum(ds, de)))
-            left[k] = False
-            l = lines[idx[k]] if ds[k] <= de[k] else lines[idx[k]][::-1]
-            path.append(l)
-            up = np.zeros(len(l), bool)
-            up[-1] = True  # the segment leaving a stroke's last point hops to the next stroke
-            pen_up.append(up)
-            cur = l[-1]
+    for _ in range(len(lines)):
+        ds = np.where(left, np.hypot(*(starts - cur).T), np.inf)
+        de = np.where(left, np.hypot(*(ends - cur).T), np.inf)
+        k = int(np.argmin(np.minimum(ds, de)))
+        left[k] = False
+        l = lines[k] if ds[k] <= de[k] else lines[k][::-1]
+        path.append(l)
+        up = np.zeros(len(l), bool)
+        up[-1] = True  # the segment leaving a line's last point hops to the next line
+        pen_up.append(up)
+        cur = l[-1]
     return np.vstack(path), np.concatenate(pen_up)
 
 
@@ -139,65 +131,65 @@ def resample(poly, n):
     return pts, vertex, s[-1]
 
 
-def neon_palette(im, pts, jitter):
-    """Painting colour under each sample, pushed brighter and more saturated, quantised to PALETTE colours."""
-    col = np.asarray(im.filter(ImageFilter.GaussianBlur(1.5)), np.float64) / 255
+def neon_palette(im, pts):
+    """Painting colour under each sample, brighter and more saturated, quantised to PALETTE colours."""
+    col = np.asarray(im.filter(ImageFilter.GaussianBlur(2)), np.float64) / 255
     xi = np.clip(pts[:, 0].astype(int), 0, col.shape[1] - 1)
     yi = np.clip(pts[:, 1].astype(int), 0, col.shape[0] - 1)
-    c = col[yi, xi]
-    out = np.empty_like(c)
-    for i, (rgb, j) in enumerate(zip(c, jitter)):
+    out = np.empty((len(pts), 3))
+    for i, rgb in enumerate(col[yi, xi]):
         h, l, s = colorsys.rgb_to_hls(*rgb)
-        out[i] = colorsys.hls_to_rgb((h + j) % 1, 0.42 + 0.45 * l ** 0.8, min(1, 0.55 + s * 1.4))
-    img = Image.fromarray((out[None] * 255).astype(np.uint8))
-    q = img.quantize(PALETTE, method=Image.Quantize.MEDIANCUT)
+        out[i] = colorsys.hls_to_rgb(h, 0.45 + 0.45 * l ** 0.8, min(1, 0.6 + s * 1.4))
+    q = Image.fromarray((out[None] * 255).astype(np.uint8)).quantize(PALETTE, method=Image.Quantize.MEDIANCUT)
     pal = np.array(q.getpalette()[:PALETTE * 3]).reshape(-1, 3)
     return np.asarray(q)[0].astype(np.uint8), pal.tolist()
+
+
+def curve(c, freq, keep, m):
+    """What the circles in `keep` draw, at m points around the loop."""
+    big = np.zeros(m, complex)
+    big[freq[keep] % m] = c[keep]
+    return np.fft.ifft(big) * m
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
     im = load()
-    rgb = np.asarray(im, np.float64) / 255
-    lines = streamlines(*direction_field(rgb))
-    poly, up = spiral_chain(lines)
-    stroke_id = np.cumsum(np.concatenate([[0], up[:-1]]))  # which stroke each vertex belongs to
-    jitter = rng.normal(0, 0.045, len(lines))               # small per-stroke hue shift for variety
-
-    samples, vertex, length = resample(poly, N_SAMPLES)
-    s_up = up[vertex]
-    pal_idx, palette = neon_palette(im, samples, jitter[stroke_id[vertex]])
+    lines = streamlines(*direction_field(np.asarray(im, np.float64) / 255))
+    poly, up = chain(lines)
+    samples, vertex, length = resample(poly, SAMPLES)
+    pen_up = up[vertex]
+    pal_idx, palette = neon_palette(im, samples)
 
     z = samples[:, 0] + 1j * samples[:, 1]
     c = np.fft.fft(z) / len(z)
     freq = np.fft.fftfreq(len(z), d=1.0 / len(z)).astype(np.int64)
-    keep = np.argsort(-np.abs(c))[:N_TERMS]
-    keep = np.concatenate([[0], keep[keep != 0]])[:N_TERMS]  # constant term first: it anchors the chain
+    rest = np.argsort(-np.abs(c[1:])) + 1
+    order = np.concatenate([[0], rest])  # the constant term anchors the chain, then biggest circles first
 
-    # what the kept circles really draw, OVERSAMPLE points per sample
-    m = len(z) * OVERSAMPLE
-    big = np.zeros(m, complex)
-    big[freq[keep] % m] = c[keep]
-    trail = np.fft.ifft(big) * m
-    err = np.abs(trail[::OVERSAMPLE] - z)
+    rounds = [r["circles"] for r in CFG["rounds"]]
+    with open(os.path.join(OUT, "trails.bin"), "wb") as f:
+        for i, n in enumerate(rounds):
+            m = SAMPLES * (FINAL_OVERSAMPLE if i == len(rounds) - 1 else 1)
+            tr = curve(c, freq, order[:n + 1], m)
+            f.write(np.column_stack([tr.real, tr.imag]).astype(np.float32).tobytes())
+    err = np.abs(curve(c, freq, order[:rounds[-1] + 1], SAMPLES) - z)
 
+    k = rounds[-1] + 1
     with open(os.path.join(OUT, "terms.bin"), "wb") as f:
-        f.write(freq[keep].astype(np.int32).tobytes())
-        f.write(np.abs(c[keep]).astype(np.float32).tobytes())
-        f.write(np.angle(c[keep]).astype(np.float32).tobytes())
-    with open(os.path.join(OUT, "trail.bin"), "wb") as f:
-        f.write(np.column_stack([trail.real, trail.imag]).astype(np.float32).tobytes())
-    attr = np.column_stack([np.repeat(s_up, OVERSAMPLE), np.repeat(pal_idx, OVERSAMPLE)]).astype(np.uint8)
+        f.write(freq[order[:k]].astype(np.int32).tobytes())
+        f.write(np.abs(c[order[:k]]).astype(np.float32).tobytes())
+        f.write(np.angle(c[order[:k]]).astype(np.float32).tobytes())
     with open(os.path.join(OUT, "attr.bin"), "wb") as f:
-        f.write(attr.tobytes())
+        f.write(np.column_stack([pen_up, pal_idx]).astype(np.uint8).tobytes())
     meta = {
-        "samples": len(z), "oversample": OVERSAMPLE, "terms": len(keep),
+        "samples": SAMPLES, "finalOversample": FINAL_OVERSAMPLE, "terms": k, "rounds": rounds,
         "paintingWidth": W, "paintingHeight": im.height, "focus": FOCUS, "palette": palette,
     }
     with open(os.path.join(OUT, "meta.json"), "w") as f:
         json.dump(meta, f)
-    print(f"{len(lines)} strokes, line {length:.0f}px ({s_up.mean():.0%} pen-up), "
-          f"{len(keep)} circles, error mean {err.mean():.3f}px max {err.max():.2f}px")
+    print(f"{len(lines)} strokes, line {length:.0f}px ({pen_up.mean():.0%} pen-up), "
+          f"{rounds[-1]} circles in the last round, error mean {err.mean():.2f}px max {err.max():.2f}px")
 
 
 if __name__ == "__main__":
