@@ -9,21 +9,27 @@ none.
 - 图案：猫、心形、五角星、任意文字、手绘一笔
 - 「逐级增加圆」：1、2、4、8…个圆依次绘制，看图案从模糊的椭圆变成清晰的轮廓
 
-## 傅里叶画蒙娜丽莎 · 竖屏视频 (`video/`)
+## 星月夜 · 傅里叶竖屏视频 (`video/`)
 
-1 → 2 → 4 → … → 16384 个旋转圆，每一轮圆的数量翻倍，从一团乱线逐渐收敛成《蒙娜丽莎》。
-输出 1080×1920、60 fps 的 mp4。
+13 万个首尾相接的旋转圆，一笔画出梵高《星月夜》。1080×1920、60 fps、48 秒，配乐同步。
+
+- 开场镜头贴在漩涡中心的笔尖上，看不出在画什么；
+- 画面向外一圈圈生长，镜头随之拉远，笔速按指数加快；
+- 最后一笔闭合：圆炸开，一道冲击波把彩虹色线条变成原画的颜色；
+- 揭晓后，光波随节拍从漩涡中心扩散。
 
 ```bash
-pip install numpy pillow scikit-image   # 一次即可
+pip install numpy scipy pillow       # 一次即可
 cd video
-python3 make_path.py assets/mona_lisa.jpg terms.json   # 图片 → 等高线 → 一笔画 → FFT
-node render.js                                         # 逐帧渲染 → fourier_mona_lisa.mp4
-node render.js --stills 600,1800                       # 只导出几帧 PNG 预览
+python3 make_path.py    # 原画 → 笔触流线 → 一笔画 → FFT，输出 data/
+python3 music.py        # 合成配乐 music.wav
+node render.js          # 逐帧渲染并混入音乐 → starry_night.mp4
+node render.js --stills 600,1800     # 只导出几帧 PNG 预览
+node render.js --mux                 # 改了配乐后只重新合成音轨
 ```
 
-- `make_path.py`：把图片亮度的等高线连成一条闭合曲线，等弧长采样 32768 点做 FFT，保留最大的 16384 个圆。轮廓之间的跳线记为“提笔”，圆够多以后画得很淡。
-- `scene.html`：Canvas 渲染器，每个圆是一个旋转的复数相量，笔尖是它们的和。
-- `render.js`：用无头 Chromium 逐帧截图，经 ffmpeg 编码成 H.264。
-- 换图：把 `assets/` 里的图片换掉，调 `make_path.py` 顶部的 `CROP`、`LEVELS`。
-- 原画《蒙娜丽莎》为公有领域作品（图片来自 Wikimedia Commons）。
+- `make_path.py`：按原画笔触方向场追踪 7000 多条流线（每条像一笔油画笔触），从漩涡中心向外逐环串成一条闭合曲线，采样 262144 点做 FFT，保留最大的 131072 个圆。笔触之间的跳线是“提笔”，不画出来。
+- `scene.html`：Canvas 渲染器，镜头、配色、冲击波、光晕都在这里。
+- `music.py`：用 numpy 合成的原创配乐，时间点读 `config.json`，和画面同步。
+- `config.json`：时长、高潮时间、节拍。
+- 原画《星月夜》为公有领域作品（图片来自 Wikimedia Commons）。

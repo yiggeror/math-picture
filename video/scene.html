@@ -1,269 +1,331 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Fourier scene</title>
+<title>Starry Night epicycles</title>
 <style>html, body { margin: 0; background: #000; } canvas { display: block; }</style>
-<canvas id="c" width="1080" height="1920"></canvas>
+<canvas id="c"></canvas>
 <script>
-// Frame-by-frame renderer. render.js calls init(data, font) once, then renderFrame(0..total-1) in order.
-const W = 1080, H = 1920, FPS = 60;
+// Frame-by-frame renderer. render.js serves this folder, calls init() once, then renderFrame(0..total-1) in order.
+//
+// Story: extreme close-up on the pen at the centre of the big swirl -> the camera pulls back as the
+// drawing spreads outward and the pen speeds up exponentially -> the last stroke closes, the circles
+// burst, a shockwave turns the rainbow lines into the painting's own colours -> the painting pulses.
+
+let CFG, META, W, H, PW, PH, M;
+let FREQ, AMP, PHASE, K;
+let TX, TY, R, UPC, PAL, RMAX;   // trail x/y, distance from focus, pen-up prefix count, palette index
+let REACH;                        // running max of R: how far out the drawing has reached
 const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
-const ghost = new OffscreenCanvas(W, H);   // trails of earlier rounds, fading
-const gctx = ghost.getContext('2d');
-const cur = new OffscreenCanvas(W, H);     // trail of the current round
-const cctx = cur.getContext('2d');
+let ctx, small, sctx, small2, sctx2;
 
-let S, FREQ, AMP, PHASE, HOP, timeline, total;
-const st = {};  // per-round state
-
-const sec = s => Math.round(s * FPS);
-const lerp = (a, b, t) => a + (b - a) * t;
 const clamp01 = t => Math.max(0, Math.min(1, t));
-const smooth = t => t * t * (3 - 2 * t);
+const smooth = t => { t = clamp01(t); return t * t * (3 - 2 * t); };
+const lerp = (a, b, t) => a + (b - a) * t;
 
-async function init(data, fontB64) {
-  S = data.samples;
-  const n = data.terms.length;
-  FREQ = new Float64Array(n); AMP = new Float64Array(n); PHASE = new Float64Array(n);
-  data.terms.forEach(([f, a, p], i) => { FREQ[i] = f; AMP[i] = a; PHASE[i] = p; });
-  HOP = new Uint8Array(S);
-  for (const [a, b] of data.hops) HOP.fill(1, a, b);
+async function init() {
+  const get = async (p, kind) => { const r = await fetch(p); return kind === 'json' ? r.json() : r.arrayBuffer(); };
+  CFG = await get('config.json', 'json');
+  META = await get('data/meta.json', 'json');
+  W = CFG.width; H = CFG.height;
+  canvas.width = W; canvas.height = H;
+  ctx = canvas.getContext('2d');
+  small = new OffscreenCanvas(W / 4, H / 4);
+  sctx = small.getContext('2d');
+  small2 = new OffscreenCanvas(W / 4, H / 4);
+  sctx2 = small2.getContext('2d');
+  PW = META.paintingWidth; PH = META.paintingHeight;
 
-  const bytes = Uint8Array.from(atob(fontB64), c => c.charCodeAt(0));
-  const face = new FontFace('Title', bytes.buffer, { weight: '900' });
-  await face.load();
-  document.fonts.add(face);
+  const terms = await get('data/terms.bin');
+  K = META.terms;
+  FREQ = new Int32Array(terms, 0, K);
+  AMP = new Float32Array(terms, 4 * K, K);
+  PHASE = new Float32Array(terms, 8 * K, K);
 
-  // 1, 2, 4, ... circles; later rounds get more time because there is more to see.
-  const maxK = n - 1;
-  const rounds = [];
-  for (let k = 1; k < maxK; k *= 2) rounds.push(k);
-  rounds.push(maxK);
-  timeline = [{ type: 'intro', frames: sec(1.6) }];
-  rounds.forEach((K, i) => {
-    const last = i === rounds.length - 1;
-    const dur = last ? 9 : K <= 8 ? 1.5 : K <= 128 ? 2.0 : K <= 2048 ? 2.6 : 3.2;
-    timeline.push({ type: 'round', K, index: i, last, frames: sec(dur) });
-    if (!last) timeline.push({ type: 'gap', frames: sec(0.25) });
-  });
-  timeline.push({ type: 'outro', frames: sec(5) });
-  st.rounds = rounds.length;
-  let start = 0;
-  for (const seg of timeline) { seg.start = start; start += seg.frames; }
-  total = start;
-  return { total, rounds };
-}
-
-function hueFor(index) {
-  // gold -> orange -> red -> magenta across the rounds
-  return (48 - 88 * index / (st.rounds - 2) + 360) % 360;
-}
-
-function startRound(seg) {
-  const K = seg.K;
-  st.K = K; st.index = seg.index; st.last = seg.last;
-  st.done = 0;          // samples drawn so far
-  st.pr = new Float64Array(K + 1); st.pi = new Float64Array(K + 1);
-  st.cr = new Float64Array(K + 1); st.ci = new Float64Array(K + 1);
-  const dTheta = 2 * Math.PI / S;
-  for (let i = 0; i <= K; i++) {
-    st.pr[i] = AMP[i] * Math.cos(PHASE[i]); st.pi[i] = AMP[i] * Math.sin(PHASE[i]);
-    st.cr[i] = Math.cos(FREQ[i] * dTheta);  st.ci[i] = Math.sin(FREQ[i] * dTheta);
+  const trail = new Float32Array(await get('data/trail.bin'));
+  const attr = new Uint8Array(await get('data/attr.bin'));
+  M = trail.length / 2;
+  TX = new Float32Array(M); TY = new Float32Array(M); R = new Float32Array(M);
+  UPC = new Uint32Array(M + 1); PAL = new Uint8Array(M); REACH = new Float32Array(M);
+  const [fx, fy] = META.focus;
+  let reach = 0;
+  for (let i = 0; i < M; i++) {
+    TX[i] = trail[2 * i]; TY[i] = trail[2 * i + 1];
+    R[i] = Math.hypot(TX[i] - fx, TY[i] - fy);
+    UPC[i + 1] = UPC[i] + attr[2 * i];
+    PAL[i] = attr[2 * i + 1];
+    if (!attr[2 * i] && R[i] > reach) reach = R[i];
+    REACH[i] = reach;
   }
-  st.tip = sumTip();
-  // pen-up hops fade out once there are enough circles to draw the picture faithfully
-  st.hopAlpha = lerp(1, 0.05, clamp01((Math.log2(K) - 7) / 5));
-  st.hue = seg.last ? null : hueFor(seg.index);
-  st.pop = 0;
-  cctx.clearRect(0, 0, W, H);
+  RMAX = reach;
+  const lum = META.palette.map(([r, g, b]) => 0.3 * r + 0.59 * g + 0.11 * b);
+  const lo = Math.min(...lum), hi = Math.max(...lum);
+  PAL_LUM = lum.map(v => Math.min(LUMS - 1, Math.floor((v - lo) / (hi - lo + 1e-6) * LUMS)));
+  buildSchedule();
+  return { total: TOTAL, fps: CFG.fps };
 }
 
-function sumTip() {
-  let x = 0, y = 0;
-  for (let i = 0; i <= st.K; i++) { x += st.pr[i]; y += st.pi[i]; }
-  return [x, y];
+// ---------- schedule ----------
+let TOTAL, F_START, F_CLIMAX, F_WAVE, F_END, V0, KR;
+let ZOOM0;
+function buildSchedule() {
+  const fps = CFG.fps;
+  F_START = Math.round(0.4 * fps);
+  F_CLIMAX = Math.round(CFG.climax * fps);
+  F_WAVE = Math.round(CFG.wave * fps);
+  F_END = Math.round(CFG.end * fps);
+  TOTAL = F_END;
+  // pen speed v(f) = V0 * e^(KR f): solve KR so the whole line is drawn exactly at the climax
+  V0 = 3;
+  const n = F_CLIMAX - F_START;
+  let lo = 1e-5, hi = 0.05;
+  for (let i = 0; i < 100; i++) {
+    const k = (lo + hi) / 2;
+    (V0 * (Math.exp(k * n) - 1) / k > M) ? hi = k : lo = k;
+  }
+  KR = (lo + hi) / 2;
+  ZOOM0 = (W / 2) / 26;  // the opening view is 52 painting-pixels wide
 }
 
-function advance(target) {
-  // rotate every phasor one sample at a time; the tip is their sum
-  const { pr, pi, cr, ci, K } = st;
-  const pts = [st.tip];
-  const hops = [HOP[st.done % S]];
-  while (st.done < target) {
-    let x = 0, y = 0;
-    for (let i = 0; i <= K; i++) {
-      const r = pr[i] * cr[i] - pi[i] * ci[i];
-      pi[i] = pr[i] * ci[i] + pi[i] * cr[i];
-      pr[i] = r;
-      x += r; y += pi[i];
+function progressAt(f) {
+  if (f <= F_START) return 0;
+  if (f >= F_CLIMAX) return M;
+  const x = f - F_START;
+  return Math.min(M, V0 * (Math.exp(KR * x) - 1) / KR);
+}
+
+// ---------- camera ----------
+const cam = { logE: 0, init: false };
+function camera(f, P) {
+  const halfFinal = W / 2;                                  // painting fills the width at zoom 1
+  const reach = P > 0 ? REACH[Math.min(M - 1, Math.floor(P))] : 0;
+  const target = Math.min(halfFinal, Math.max(W / 2 / ZOOM0, reach * 1.2));
+  if (!cam.init) { cam.logE = Math.log(target); cam.init = true; }
+  cam.logE += (Math.log(target) - cam.logE) * 0.06;         // ease toward the target framing
+  let Z = Math.max(1, halfFinal / Math.exp(cam.logE));
+  // after the reveal, a slow push in
+  if (f > F_CLIMAX + F_WAVE) Z *= 1 + 0.07 * smooth((f - F_CLIMAX - F_WAVE) / (F_END - F_CLIMAX - F_WAVE));
+  const w = Math.pow(clamp01(Math.log(Z) / Math.log(ZOOM0)), 0.6);
+  const [fx, fy] = META.focus;
+  const cx = lerp(PW / 2, fx, w), cy = lerp(PH / 2, fy, w);
+  return { Z, cx, cy };
+}
+
+// ---------- colour ----------
+const RAINBOW = 48;
+const LEVELS = 5;
+const LUMS = 3;
+const rainbowColor = (b, l) => `hsl(${(b / RAINBOW) * 360}, 100%, ${44 + 14 * l}%)`;
+let PAL_LUM;  // 0..LUMS-1 brightness class of each palette colour
+function paletteColor(p, level) {
+  const [r, g, b] = META.palette[p];
+  const k = 0.55 + 0.17 * level + 0.12 * PAL_LUM[p];        // ripple level, plus extra for bright colours
+  const lift = Math.max(0, k - 1) * 255;                     // above 1 we push toward white
+  const c = v => Math.round(Math.min(255, v * Math.min(k, 1) + lift));
+  return `rgb(${c(r)}, ${c(g)}, ${c(b)})`;
+}
+
+// ---------- drawing ----------
+const paths = new Map();
+function pathFor(key) {
+  let p = paths.get(key);
+  if (!p) { p = { path: new Path2D(), open: false }; paths.set(key, p); }
+  return p;
+}
+
+function drawLines(f, P, view, phase) {
+  const { Z, cx, cy } = view;
+  const t = f / CFG.fps;
+  const stride = Math.max(1, Math.min(8, Math.floor(2.4 / (0.3 * Z))));
+  const ox = W / 2 - cx * Z, oy = H / 2 - cy * Z;
+  const margin = 40;
+  paths.clear();
+  const end = Math.floor(P);
+  const waveR = phase.waveR, band = 70;
+  let lastKey = null, prevVisible = false;
+  let px = 0, py = 0;
+  for (let i = 0; i + stride <= end; i += stride) {
+    const j = i + stride;
+    if (UPC[j] - UPC[i] > 0) { lastKey = null; continue; }   // pen up somewhere in this step
+    const x0 = TX[i] * Z + ox, y0 = TY[i] * Z + oy;
+    const x1 = TX[j] * Z + ox, y1 = TY[j] * Z + oy;
+    if ((x0 < -margin && x1 < -margin) || (x0 > W + margin && x1 > W + margin) ||
+        (y0 < -margin && y1 < -margin) || (y0 > H + margin && y1 > H + margin)) { lastKey = null; continue; }
+    let key;
+    const r = R[i];
+    if (r < waveR - band) {
+      key = phase.level ? 'p' + PAL[i] + ':' + phase.level(r) : 'p' + PAL[i] + ':2';
+    } else if (r < waveR) {
+      key = 'w';
+    } else {
+      const hue = Math.log2(r + 8) * 0.5 - t * 0.1 + (PAL[i] / 64 - 0.5) * 0.08;
+      key = 'h' + (((Math.floor(hue * RAINBOW) % RAINBOW) + RAINBOW) % RAINBOW) + ':' + PAL_LUM[PAL[i]];
     }
-    st.done++;
-    pts.push([x, y]);
-    hops.push(HOP[st.done % S]);
+    const p = pathFor(key);
+    if (key !== lastKey) p.path.moveTo(x0, y0);
+    p.path.lineTo(x1, y1);
+    lastKey = key;
   }
-  st.tip = pts[pts.length - 1];
-  return { pts, hops };
-}
-
-function strokeRuns(g, pts, hops, color, width, alpha) {
-  // consecutive segments with the same pen state go in one path
-  let i = 0;
-  while (i < pts.length - 1) {
-    const h = hops[i];
-    let j = i;
-    g.beginPath();
-    g.moveTo(pts[i][0], pts[i][1]);
-    while (j < pts.length - 1 && hops[j] === h) { j++; g.lineTo(pts[j][0], pts[j][1]); }
-    g.globalAlpha = alpha * (h ? st.hopAlpha : 1);
-    g.strokeStyle = color;
-    g.lineWidth = width;
-    g.stroke();
-    i = j;
+  const width = 1.25 * Math.pow(Z, 0.42) * (phase.level ? 1.3 : 1);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.lineWidth = width;
+  for (const [key, p] of paths) {
+    if (key === 'w') { ctx.strokeStyle = '#fff8e8'; ctx.lineWidth = width * 1.8; }
+    else if (key[0] === 'h') { const [hb, lb] = key.slice(1).split(':'); ctx.strokeStyle = rainbowColor(+hb, +lb); ctx.lineWidth = width; }
+    else { const [pp, lv] = key.slice(1).split(':'); ctx.strokeStyle = paletteColor(+pp, +lv); ctx.lineWidth = width; }
+    ctx.stroke(p.path);
   }
-  g.globalAlpha = 1;
 }
 
-function drawTrailPiece(pts, hops, progress) {
-  cctx.globalCompositeOperation = 'lighter';
-  cctx.lineJoin = 'round'; cctx.lineCap = 'round';
-  const core = st.hue === null ? 'hsl(42, 100%, 88%)' : `hsl(${(st.hue + 30 * progress) % 360}, 100%, 62%)`;
-  const glow = st.hue === null ? 'hsl(36, 100%, 60%)' : `hsl(${(st.hue + 30 * progress) % 360}, 100%, 50%)`;
-  strokeRuns(cctx, pts, hops, glow, 6, 0.10);
-  strokeRuns(cctx, pts, hops, core, st.hue === null ? 1.5 : 1.7, 0.95);
-  cctx.globalCompositeOperation = 'source-over';
+function chainAt(theta) {
+  // positions of every circle centre for parameter theta; returns Float64Array [x0,y0,x1,y1,...] and the tip
+  const pts = new Float64Array(2 * (K + 1));
+  let x = 0, y = 0;
+  for (let i = 0; i < K; i++) {
+    pts[2 * i] = x; pts[2 * i + 1] = y;
+    const a = FREQ[i] * theta + PHASE[i];
+    x += AMP[i] * Math.cos(a); y += AMP[i] * Math.sin(a);
+  }
+  pts[2 * K] = x; pts[2 * K + 1] = y;
+  return pts;
 }
 
-function drawEpicycles(alpha) {
-  if (alpha <= 0) return;
-  const { pr, pi, K } = st;
-  let x = pr[0], y = pi[0];
+function drawEpicycles(chain, view, alpha, burst = 0) {
+  if (alpha <= 0.002) return;
+  const { Z, cx, cy } = view;
+  const ox = W / 2 - cx * Z, oy = H / 2 - cy * Z;
   const rings = new Path2D(), arms = new Path2D();
-  arms.moveTo(x, y);
-  for (let i = 1; i <= K; i++) {
-    const r = AMP[i];
-    if (r > 0.8) { rings.moveTo(x + r, y); rings.arc(x, y, r, 0, Math.PI * 2); }
-    x += pr[i]; y += pi[i];
-    arms.lineTo(x, y);
+  const grow = 1 + 2.6 * Math.pow(burst, 0.7);
+  // only the circles big enough to read; the sub-pixel tail is folded into the last arm
+  // big circles get spokes and a clear outline; the long tail of small ones is a faint lace
+  const ARMS = 80;
+  const bigRings = new Path2D();
+  for (let i = 1; i < Math.min(K, 3000); i++) {
+    const x = chain[2 * i] * Z + ox, y = chain[2 * i + 1] * Z + oy;
+    if (i <= ARMS) { if (i === 1) arms.moveTo(x, y); else arms.lineTo(x, y); }
+    const r = AMP[i] * Z * grow;
+    if (r < 3) { if (i > ARMS) break; continue; }
+    if (Math.abs(x - W / 2) > W / 2 + r || Math.abs(y - H / 2) > H / 2 + r) continue;
+    const target = i <= ARMS ? bigRings : rings;
+    target.moveTo(x + r, y);
+    target.arc(x, y, r, 0, Math.PI * 2);
   }
-  ctx.globalAlpha = 0.34 * alpha;
-  ctx.strokeStyle = 'rgb(140, 180, 255)';
-  ctx.lineWidth = 1.4;
+  const tipX = chain[2 * K] * Z + ox, tipY = chain[2 * K + 1] * Z + oy;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#bcd2ff';
+  ctx.globalAlpha = 0.08 * alpha;
   ctx.stroke(rings);
-  ctx.globalAlpha = 0.6 * alpha;
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 1.2;
-  ctx.stroke(arms);
-  // pen tip
-  const g = ctx.createRadialGradient(x, y, 0, x, y, 22);
-  g.addColorStop(0, 'rgba(255, 245, 220, 1)');
-  g.addColorStop(0.25, 'rgba(255, 210, 120, 0.6)');
-  g.addColorStop(1, 'rgba(255, 180, 80, 0)');
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = g;
-  ctx.beginPath(); ctx.arc(x, y, 22, 0, Math.PI * 2); ctx.fill();
-  ctx.globalAlpha = 1;
-}
-
-function commitRound() {
-  // earlier rounds dim, then the finished one joins them
-  gctx.globalCompositeOperation = 'destination-out';
-  gctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-  gctx.fillRect(0, 0, W, H);
-  gctx.globalCompositeOperation = 'lighter';
-  gctx.globalAlpha = 0.7;
-  gctx.drawImage(cur, 0, 0);
-  gctx.globalAlpha = 1;
-  gctx.globalCompositeOperation = 'source-over';
-  cctx.clearRect(0, 0, W, H);
-}
-
-function text(str, x, y, size, color, alpha = 1, align = 'center') {
-  ctx.globalAlpha = alpha;
-  ctx.font = `900 ${size}px Title, "Noto Serif SC", serif`;
-  ctx.textAlign = align;
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillStyle = color;
-  ctx.fillText(str, x, y);
-  ctx.globalAlpha = 1;
-}
-
-function drawCounter(K, pop, alpha) {
-  const num = String(K);
-  const s = 1 + 0.28 * (1 - smooth(clamp01(pop)));
-  ctx.save();
-  ctx.translate(W / 2, 318);
-  ctx.scale(s, s);
-  ctx.font = '900 104px Title, serif';
-  const nw = ctx.measureText(num).width;
-  ctx.font = '900 56px Title, serif';
-  const uw = ctx.measureText(' 个圆').width;
-  const x0 = -(nw + uw) / 2;
-  ctx.shadowColor = 'rgba(255, 190, 80, 0.55)';
-  ctx.shadowBlur = 24;
-  text(num, x0, 0, 104, '#ffcf6b', alpha, 'left');
-  ctx.shadowBlur = 0;
-  text(' 个圆', x0 + nw, 0, 56, '#fff', alpha, 'left');
-  ctx.restore();
-}
-
-function header(alpha, outroT = 0) {
-  const a1 = alpha * (1 - smooth(clamp01(outroT * 3)));
-  const a2 = alpha * smooth(clamp01(outroT * 3 - 0.6));
-  text('圆套着圆旋转', W / 2, 150, 76, '#fff', a1);
-  text('每一轮，圆的数量翻倍', W / 2, 218, 40, 'rgba(255,255,255,0.62)', a1);
-  text('一笔画出《蒙娜丽莎》', W / 2, 180, 76, '#fff', a2);
-}
-
-function frameSegment(f) {
-  for (const seg of timeline) if (f < seg.start + seg.frames) return seg;
-  return timeline[timeline.length - 1];
-}
-
-let lastSeg = null;
-function renderFrame(f) {
-  const seg = frameSegment(f);
-  const t = (f - seg.start) / seg.frames;          // 0..1 within this segment
-  const entering = seg !== lastSeg;
-  if (entering && lastSeg && lastSeg.type === 'round' && !lastSeg.last) commitRound();
-  if (entering && seg.type === 'round') startRound(seg);
-  lastSeg = seg;
-
-  if (seg.type === 'round') {
-    // ease in and out so the pen sweeps quickly through the middle of each round
-    const p = lerp(t + 1 / seg.frames, smooth(t + 1 / seg.frames), 0.35);
-    const { pts, hops } = advance(Math.min(S, Math.round(S * clamp01(p))));
-    drawTrailPiece(pts, hops, p);
-    st.pop += 1 / sec(0.25);
+  ctx.globalAlpha = 0.3 * alpha;
+  ctx.stroke(bigRings);
+  if (!burst) {
+    ctx.globalAlpha = 0.42 * alpha;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.stroke(arms);
+    const g = ctx.createRadialGradient(tipX, tipY, 0, tipX, tipY, 18);
+    g.addColorStop(0, 'rgba(255,255,255,0.95)');
+    g.addColorStop(0.35, 'rgba(255,240,210,0.35)');
+    g.addColorStop(1, 'rgba(255,220,160,0)');
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = g;
+    ctx.fillRect(tipX - 18, tipY - 18, 36, 36);
   }
+  ctx.globalAlpha = 1;
+}
 
+function bloom(strength) {
+  if (strength <= 0) return;
+  sctx.globalCompositeOperation = 'copy';
+  sctx.drawImage(canvas, 0, 0, W / 4, H / 4);
+  sctx2.globalCompositeOperation = 'copy';
+  sctx2.filter = 'blur(5px)';
+  sctx2.drawImage(small, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = Math.min(1, strength);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(small2, 0, 0, W, H);
+  if (strength > 1) { ctx.globalAlpha = strength - 1; ctx.drawImage(small2, 0, 0, W, H); }
+  ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
+}
+
+// ripples of light from the swirl, one every two beats after the reveal
+function rippleLevel(f) {
+  const t = f / CFG.fps;
+  const start = CFG.climax + CFG.wave * 0.6;
+  const period = 2 * 60 / CFG.bpm;
+  const speed = 620;
+  const fade = clamp01((CFG.end - t) / 4);
+  const breathing = 0.5 + 0.5 * Math.sin(t * 2.1);
+  return r => {
+    let b = 0;
+    for (let j = 0; j < 12; j++) {
+      const tj = start + j * period;
+      if (t < tj) break;
+      const d = r - speed * (t - tj);
+      b += Math.exp(-(d * d) / (2 * 55 * 55));
+    }
+    b *= fade;
+    return Math.max(0, Math.min(LEVELS - 1, Math.round(1.6 + 0.6 * breathing + b * 2.4)));
+  };
+}
+
+let chainCache = null;
+// draw=false only advances the camera (it eases frame to frame), so previews can jump ahead cheaply
+function renderFrame(f, draw = true) {
+  const P = progressAt(f);
+  const view = camera(f, P);
+  if (!draw) {
+    if (f === F_CLIMAX - 1) chainCache = chainAt(2 * Math.PI * P / M);
+    return;
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, W, H);
 
-  const outroT = seg.type === 'outro' ? t : 0;
-  ctx.globalAlpha = 1 - smooth(clamp01(outroT * 2.5));
-  ctx.drawImage(ghost, 0, 0);
-  ctx.globalAlpha = 1;
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.drawImage(cur, 0, 0);
-  if (seg.type === 'outro') {
-    // let the finished portrait bloom
-    ctx.globalAlpha = 0.5 * smooth(clamp01(outroT * 2)) * (0.75 + 0.25 * Math.sin(outroT * Math.PI * 3));
-    ctx.filter = 'blur(6px)';
-    ctx.drawImage(cur, 0, 0);
-    ctx.filter = 'none';
-    ctx.globalAlpha = 1;
+  // colour phase
+  const tw = (f - F_CLIMAX) / F_WAVE;                        // 0..1 during the shockwave
+  const phase = { waveR: -1e9, level: null };
+  if (f >= F_CLIMAX) {
+    phase.waveR = smooth(tw) * (RMAX + 200) * 1.02 + (tw > 0 ? 70 : 0);
+    if (tw > 0.3) phase.level = rippleLevel(f);
   }
-  ctx.globalCompositeOperation = 'source-over';
+  drawLines(f, P, view, phase);
 
-  if (seg.type === 'round' || seg.type === 'gap') drawEpicycles(seg.type === 'gap' ? 1 : 1);
-  if (seg.type === 'outro') drawEpicycles(1 - smooth(clamp01(t * 4)));
-
-  const introA = seg.type === 'intro' ? smooth(clamp01(t * 1.6)) : 1;
-  header(introA, outroT);
-  if (seg.type !== 'intro' || t > 0.4) {
-    const K = seg.type === 'intro' ? 1 : st.K;
-    drawCounter(K, seg.type === 'round' ? st.pop : 1, seg.type === 'intro' ? smooth(clamp01((t - 0.4) * 3)) : 1);
+  // glow: steady while drawing, a surge at the climax, then a soft pulse with the ripples
+  let glow = 0.7;
+  if (f >= F_CLIMAX) glow = 0.8 + 0.7 * Math.exp(-((f - F_CLIMAX) / CFG.fps) * 2.5);
+  bloom(glow);
+  if (f >= F_CLIMAX) {
+    // a burst of light from the centre of the swirl
+    const s = (f - F_CLIMAX) / CFG.fps;
+    const a = 0.85 * Math.exp(-s * 5);
+    if (a > 0.004) {
+      const fx = W / 2 + (META.focus[0] - view.cx) * view.Z, fy = H / 2 + (META.focus[1] - view.cy) * view.Z;
+      const rad = 250 + 900 * (1 - Math.exp(-s * 4));
+      const g = ctx.createRadialGradient(fx, fy, 0, fx, fy, rad);
+      g.addColorStop(0, `rgba(255, 250, 235, ${a})`);
+      g.addColorStop(0.4, `rgba(255, 230, 190, ${a * 0.35})`);
+      g.addColorStop(1, 'rgba(255, 220, 170, 0)');
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'source-over';
+    }
   }
+
+  // circles: following the pen, then bursting outward at the climax
+  if (f < F_CLIMAX) {
+    chainCache = chainAt(2 * Math.PI * P / M);
+    drawEpicycles(chainCache, view, Math.min(1, (f + 1) / 20));
+  } else if (chainCache) {
+    const b = clamp01((f - F_CLIMAX) / (0.9 * CFG.fps));
+    drawEpicycles(chainCache, view, (1 - b) * (1 - b), b);
+  }
+
+  // fade in / out
+  const fadeIn = smooth(f / (0.8 * CFG.fps));
+  const fadeOut = smooth((F_END - 1 - f) / (CFG.fadeOut * CFG.fps));
+  const k = Math.min(fadeIn, fadeOut);
+  if (k < 1) { ctx.fillStyle = `rgba(0,0,0,${1 - k})`; ctx.fillRect(0, 0, W, H); }
 }
 </script>

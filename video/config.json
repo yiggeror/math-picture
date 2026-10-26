@@ -1,0 +1,10 @@
+{
+  "fps": 60,
+  "width": 1080,
+  "height": 1920,
+  "climax": 33.0,
+  "wave": 1.5,
+  "end": 48.0,
+  "fadeOut": 3.0,
+  "bpm": 100
+}
