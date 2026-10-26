@@ -1,0 +1,607 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>傅里叶旋转圆绘画</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Serif+SC:wght@600&display=swap">
+<style>
+  /* Layout: full-bleed black canvas; title + live readout float top-left, a compact control dock floats at the bottom. Single dark look by choice. */
+  :root {
+    --ink: #050506;          /* canvas ground */
+    --paper: #ece9e4;        /* the drawn line, warm white */
+    --circle: #c8553d;       /* epicycle rings, brick red like a chalkboard compass */
+    --pen: #8be37a;          /* pen tip */
+    --dock: rgba(18, 18, 20, 0.86);
+    --rule: rgba(236, 233, 228, 0.14);
+    --muted: rgba(236, 233, 228, 0.58);
+    --font-display: "Noto Serif SC", "Songti SC", "STSong", serif;
+    --font-ui: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  [hidden] { display: none !important; }
+  body {
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--font-ui);
+    overflow: hidden;
+  }
+  canvas#stage {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+    touch-action: none;
+  }
+  .head {
+    position: fixed;
+    top: calc(14px + env(safe-area-inset-top, 0px));
+    left: max(16px, env(safe-area-inset-left, 0px));
+    right: max(16px, env(safe-area-inset-right, 0px));
+    pointer-events: none;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .head h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 1.25rem;
+    letter-spacing: 0.04em;
+  }
+  .formula {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+  .readout {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--paper);
+  }
+  .readout b { color: var(--circle); font-weight: 500; }
+  .dock {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 12px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: var(--dock);
+    border-top: 1px solid var(--rule);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .dock-inner {
+    max-width: 760px; margin: 0 auto;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .chip {
+    font: inherit; font-size: 0.86rem;
+    color: var(--paper);
+    background: transparent;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: 6px 13px;
+    cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { border-color: var(--paper); background: var(--paper); color: var(--ink); }
+  .chip:focus-visible, .btn:focus-visible, input:focus-visible { outline: 2px solid var(--pen); outline-offset: 2px; }
+  #textInput {
+    flex: 1 1 140px; min-width: 0;
+    font: inherit; font-size: 0.9rem;
+    color: var(--paper);
+    background: rgba(236, 233, 228, 0.06);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 6px 10px;
+  }
+  .btn {
+    font: inherit; font-size: 0.86rem;
+    color: var(--ink); background: var(--pen);
+    border: 0; border-radius: 8px;
+    padding: 7px 14px; cursor: pointer;
+  }
+  .btn.ghost { background: transparent; color: var(--paper); border: 1px solid var(--rule); }
+  .sliders { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 20px; }
+  .sliders label {
+    display: grid; grid-template-columns: 4.5em 1fr 3.6em; align-items: center; gap: 10px;
+    font-size: 0.82rem; color: var(--muted);
+  }
+  .sliders output { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--paper); text-align: right; font-size: 0.8rem; }
+  input[type="range"] { width: 100%; accent-color: var(--circle); }
+  input[type="range"]:disabled { opacity: 0.35; }
+  .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.86rem; color: var(--paper); cursor: pointer; }
+  .toggle input { accent-color: var(--circle); width: 16px; height: 16px; }
+  .hint { font-size: 0.8rem; color: var(--muted); }
+  .spacer { flex: 1; }
+  @media (max-width: 480px) {
+    .head h1 { font-size: 1.1rem; }
+    .chip { padding: 5px 11px; }
+  }
+</style>
+
+<canvas id="stage" aria-label="傅里叶级数绘画动画"></canvas>
+
+<header class="head">
+  <h1>傅里叶旋转圆绘画</h1>
+  <div class="formula">z(t) = Σ cₙ · e^(i·n·t)</div>
+  <div class="readout" id="readout">—</div>
+</header>
+
+<div class="dock" id="dock">
+  <div class="dock-inner">
+    <div class="row" role="group" aria-label="图案">
+      <button class="chip" data-shape="cat" aria-pressed="true">猫</button>
+      <button class="chip" data-shape="heart" aria-pressed="false">心形</button>
+      <button class="chip" data-shape="star" aria-pressed="false">五角星</button>
+      <button class="chip" data-shape="text" aria-pressed="false">文字</button>
+      <button class="chip" data-shape="draw" aria-pressed="false">手绘</button>
+      <span class="spacer"></span>
+      <label class="toggle"><input type="checkbox" id="progressive" checked> 逐级增加圆</label>
+    </div>
+    <div class="row" id="textRow" hidden>
+      <input id="textInput" type="text" value="π" maxlength="8" aria-label="要画的文字">
+      <button class="btn" id="textGo">画出文字</button>
+    </div>
+    <div class="row" id="drawRow" hidden>
+      <span class="hint">在画布上用手指或鼠标画一笔，松开后圆就开始复刻它。</span>
+    </div>
+    <div class="sliders">
+      <label for="countSlider">圆的数量 <input type="range" id="countSlider" min="1" max="100" value="100"> <output id="countOut">—</output></label>
+      <label for="speedSlider">速度 <input type="range" id="speedSlider" min="1" max="12" value="4"> <output id="speedOut">4×</output></label>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  const dock = document.getElementById('dock');
+  const readout = document.getElementById('readout');
+  const countSlider = document.getElementById('countSlider');
+  const countOut = document.getElementById('countOut');
+  const speedSlider = document.getElementById('speedSlider');
+  const speedOut = document.getElementById('speedOut');
+  const progressiveBox = document.getElementById('progressive');
+  const textRow = document.getElementById('textRow');
+  const drawRow = document.getElementById('drawRow');
+  const textInput = document.getElementById('textInput');
+  const css = getComputedStyle(document.documentElement);
+  const COLOR = {
+    ink: css.getPropertyValue('--ink').trim(),
+    paper: css.getPropertyValue('--paper').trim(),
+    circle: css.getPropertyValue('--circle').trim(),
+    pen: css.getPropertyValue('--pen').trim(),
+  };
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---------- shapes ----------
+  // A sitting cat, one continuous outline (ears, head, chest, back, curled tail).
+  const CAT_PATH = `
+    M 70 190
+    C 45 176, 40 132, 70 104
+    C 60 94, 55 80, 60 64
+    L 57 24 L 80 40
+    Q 99 34 118 40
+    L 140 24 L 138 64
+    C 142 80, 138 94, 128 104
+    C 160 130, 160 176, 134 190
+    C 166 196, 194 184, 190 152
+    C 188 134, 166 132, 168 148
+    C 172 172, 156 182, 132 185
+    L 70 190 Z`;
+
+  function samplePathD(d, n) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('width', '0'); svg.setAttribute('height', '0');
+    svg.style.position = 'absolute';
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+    document.body.appendChild(svg);
+    const L = path.getTotalLength();
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const p = path.getPointAtLength(L * i / n);
+      pts.push([p.x, p.y]);
+    }
+    svg.remove();
+    return pts;
+  }
+
+  function heartPoints(n) {
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const t = 2 * Math.PI * i / n;
+      const x = 16 * Math.sin(t) ** 3;
+      const y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+      pts.push([x, y]);
+    }
+    return pts;
+  }
+
+  function starPoints() {
+    const pts = [];
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 ? 0.38 : 1;
+      const a = -Math.PI / 2 + i * Math.PI / 5;
+      pts.push([r * Math.cos(a), r * Math.sin(a)]);
+    }
+    pts.push(pts[0]);
+    return resample(pts, 500);
+  }
+
+  // Resample a polyline at equal arc-length spacing.
+  function resample(pts, n) {
+    const seg = [0];
+    for (let i = 1; i < pts.length; i++) {
+      seg.push(seg[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    }
+    const total = seg[seg.length - 1];
+    if (total === 0) return pts.slice();
+    const out = [];
+    let j = 1;
+    for (let i = 0; i < n; i++) {
+      const s = total * i / n;
+      while (j < seg.length - 1 && seg[j] < s) j++;
+      const t = (s - seg[j - 1]) / ((seg[j] - seg[j - 1]) || 1);
+      out.push([
+        pts[j - 1][0] + (pts[j][0] - pts[j - 1][0]) * t,
+        pts[j - 1][1] + (pts[j][1] - pts[j - 1][1]) * t,
+      ]);
+    }
+    return out;
+  }
+
+  // Render text offscreen, take its edge pixels, then chain them by nearest neighbour.
+  function textPoints(str) {
+    const size = 220;
+    const off = document.createElement('canvas');
+    const octx = off.getContext('2d', { willReadFrequently: true });
+    const font = `700 ${size}px ${css.getPropertyValue('--font-display')}`;
+    octx.font = font;
+    const w = Math.ceil(octx.measureText(str).width) + 40;
+    off.width = Math.max(w, 60); off.height = Math.round(size * 1.4);
+    octx.font = font;
+    octx.textBaseline = 'middle';
+    octx.fillStyle = '#fff';
+    octx.fillText(str, 20, off.height / 2);
+    const { data, width, height } = octx.getImageData(0, 0, off.width, off.height);
+    const on = (x, y) => x >= 0 && y >= 0 && x < width && y < height && data[(y * width + x) * 4 + 3] > 128;
+    const step = 3;
+    const edge = [];
+    for (let y = 0; y < height; y += step) {
+      for (let x = 0; x < width; x += step) {
+        if (on(x, y) && (!on(x - step, y) || !on(x + step, y) || !on(x, y - step) || !on(x, y + step))) edge.push([x, y]);
+      }
+    }
+    if (edge.length < 4) return null;
+    const used = new Uint8Array(edge.length);
+    const order = [edge[0]];
+    used[0] = 1;
+    let cur = edge[0];
+    for (let k = 1; k < edge.length; k++) {
+      let best = -1, bd = Infinity;
+      for (let i = 0; i < edge.length; i++) {
+        if (used[i]) continue;
+        const dx = edge[i][0] - cur[0], dy = edge[i][1] - cur[1];
+        const d = dx * dx + dy * dy;
+        if (d < bd) { bd = d; best = i; }
+      }
+      used[best] = 1;
+      cur = edge[best];
+      order.push(cur);
+    }
+    // Grid sampling leaves stair-steps; average each point with its chained neighbours (never across a jump).
+    const near = step * 2.5;
+    const smooth = order.map((p, i) => {
+      let x = p[0], y = p[1], c = 1;
+      for (const j of [i - 2, i - 1, i + 1, i + 2]) {
+        const q = order[j];
+        if (q && Math.hypot(q[0] - p[0], q[1] - p[1]) < near * Math.abs(i - j)) { x += q[0]; y += q[1]; c++; }
+      }
+      return [x / c, y / c];
+    });
+    const maxPts = 1400;
+    if (smooth.length <= maxPts) return smooth;
+    const stride = order.length / maxPts;
+    const out = [];
+    for (let i = 0; i < maxPts; i++) out.push(smooth[Math.floor(i * stride)]);
+    return out;
+  }
+
+  // Centre on the bounding box and scale so the larger side is 1.
+  function normalize(pts) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [x, y] of pts) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    const s = Math.max(maxX - minX, maxY - minY) || 1;
+    return pts.map(([x, y]) => [(x - cx) / s, (y - cy) / s]);
+  }
+
+  // ---------- discrete Fourier transform ----------
+  function dft(pts) {
+    const N = pts.length;
+    const cosT = new Float64Array(N), sinT = new Float64Array(N);
+    for (let m = 0; m < N; m++) { cosT[m] = Math.cos(2 * Math.PI * m / N); sinT[m] = Math.sin(2 * Math.PI * m / N); }
+    const terms = [];
+    for (let k = 0; k < N; k++) {
+      let re = 0, im = 0;
+      for (let n = 0; n < N; n++) {
+        const idx = (k * n) % N;
+        const c = cosT[idx], s = -sinT[idx];   // e^{-2πikn/N}
+        const x = pts[n][0], y = pts[n][1];
+        re += x * c - y * s;
+        im += x * s + y * c;
+      }
+      re /= N; im /= N;
+      const freq = k <= N / 2 ? k : k - N;    // signed frequency → smoother low-order approximations
+      terms.push({ freq, amp: Math.hypot(re, im), phase: Math.atan2(im, re) });
+    }
+    // The constant term (freq 0) anchors the chain; the rest spin, biggest first.
+    const dc = terms.find(t => t.freq === 0);
+    const rest = terms.filter(t => t.freq !== 0).sort((a, b) => b.amp - a.amp);
+    return [dc, ...rest];
+  }
+
+  // ---------- state ----------
+  const state = {
+    terms: [],          // [dc, ...spinning terms]
+    N: 0,
+    theta: 0,
+    trail: [],
+    ghosts: [],         // finished trails from earlier rounds (progressive mode)
+    levels: [],
+    levelIdx: 0,
+    K: 0,               // spinning circles in use
+    round: 1,
+    holdUntil: 0,
+    drawing: null,      // raw stroke while hand-drawing
+    shape: 'cat',
+  };
+
+  function buildLevels(max) {
+    const lv = [];
+    for (let k = 1; k < max; k *= 2) lv.push(k);
+    lv.push(max);
+    return lv;
+  }
+
+  function load(rawPts) {
+    const pts = normalize(rawPts);
+    state.terms = dft(pts);
+    state.N = pts.length;
+    const maxK = state.terms.length - 1;
+    countSlider.max = String(maxK);
+    countSlider.value = String(maxK);
+    state.levels = buildLevels(maxK);
+    state.ghosts = [];
+    state.round = 1;
+    startRound(true);
+  }
+
+  function startRound(fresh) {
+    if (progressiveBox.checked) {
+      if (fresh) state.levelIdx = 0;
+      state.K = state.levels[state.levelIdx];
+      countSlider.value = String(state.K);
+    } else {
+      state.K = +countSlider.value;
+    }
+    state.theta = 0;
+    state.trail = [];
+    state.holdUntil = 0;
+    updateCountOut();
+  }
+
+  function updateCountOut() {
+    countOut.textContent = String(state.K);
+    countSlider.disabled = progressiveBox.checked;
+  }
+
+  function tipAt(theta, K) {
+    const t = state.terms;
+    let x = t[0].amp * Math.cos(t[0].phase), y = t[0].amp * Math.sin(t[0].phase);
+    for (let i = 1; i <= K; i++) {
+      const a = t[i].freq * theta + t[i].phase;
+      x += t[i].amp * Math.cos(a);
+      y += t[i].amp * Math.sin(a);
+    }
+    return [x, y];
+  }
+
+  // ---------- view ----------
+  let W = 0, H = 0, DPR = 1, view = { cx: 0, cy: 0, s: 1 };
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const top = document.querySelector('.head').getBoundingClientRect().bottom + 8;
+    const bottom = dock.getBoundingClientRect().top - 8;
+    const avail = Math.max(bottom - top, 120);
+    view.cx = W / 2;
+    view.cy = top + avail / 2;
+    view.s = Math.min(W * 0.82, avail * 0.86);
+  }
+  const sx = x => view.cx + x * view.s;
+  const sy = y => view.cy + y * view.s;
+
+  function strokeTrail(pts, width, color, alpha) {
+    if (pts.length < 2) return;
+    ctx.beginPath();
+    ctx.moveTo(sx(pts[0][0]), sy(pts[0][1]));
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(sx(pts[i][0]), sy(pts[i][1]));
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawEpicycles(theta, K) {
+    const t = state.terms;
+    let x = t[0].amp * Math.cos(t[0].phase), y = t[0].amp * Math.sin(t[0].phase);
+    const rings = new Path2D();
+    const arms = new Path2D();
+    arms.moveTo(sx(x), sy(y));
+    for (let i = 1; i <= K; i++) {
+      const r = t[i].amp * view.s;
+      const a = t[i].freq * theta + t[i].phase;
+      if (r > 0.7) {
+        rings.moveTo(sx(x) + r, sy(y));
+        rings.arc(sx(x), sy(y), r, 0, Math.PI * 2);
+      }
+      x += t[i].amp * Math.cos(a);
+      y += t[i].amp * Math.sin(a);
+      arms.lineTo(sx(x), sy(y));
+    }
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = COLOR.circle;
+    ctx.globalAlpha = 0.55;
+    ctx.stroke(rings);
+    ctx.strokeStyle = COLOR.paper;
+    ctx.globalAlpha = 0.5;
+    ctx.stroke(arms);
+    ctx.globalAlpha = 1;
+    // pen tip
+    const px = sx(x), py = sy(y);
+    const g = ctx.createRadialGradient(px, py, 0, px, py, 12);
+    g.addColorStop(0, COLOR.pen);
+    g.addColorStop(1, 'rgba(139,227,122,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(px, py, 12, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = COLOR.paper;
+    ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // ---------- loop ----------
+  function step(now) {
+    ctx.fillStyle = COLOR.ink;
+    ctx.fillRect(0, 0, W, H);
+
+    if (state.drawing) {
+      strokeTrail(state.drawing.map(([x, y]) => [(x - view.cx) / view.s, (y - view.cy) / view.s]), 2.5, COLOR.paper, 0.9);
+      readout.textContent = '正在手绘…';
+      requestAnimationFrame(step);
+      return;
+    }
+    if (!state.terms.length) { requestAnimationFrame(step); return; }
+
+    const speed = +speedSlider.value;
+    const holding = state.holdUntil && now < state.holdUntil;
+    if (!holding && state.holdUntil) {
+      // advance to next round
+      state.round++;
+      if (progressiveBox.checked) {
+        if (state.levelIdx < state.levels.length - 1) {
+          state.ghosts.push(state.trail);
+          if (state.ghosts.length > 3) state.ghosts.shift();
+          state.levelIdx++;
+          startRound(false);
+        } else {
+          state.ghosts = [];
+          state.round = 1;
+          startRound(true);
+        }
+      } else {
+        startRound(false);
+      }
+    }
+
+    if (!state.holdUntil) {
+      const dTheta = 2 * Math.PI / state.N;
+      const sub = Math.max(1, Math.ceil(speed));
+      for (let i = 0; i < sub; i++) {
+        state.theta += dTheta * speed / sub;
+        if (state.theta >= 2 * Math.PI) {
+          state.trail.push(tipAt(2 * Math.PI, state.K));
+          const last = progressiveBox.checked && state.levelIdx === state.levels.length - 1;
+          state.holdUntil = now + (last || !progressiveBox.checked ? 2600 : 700);
+          break;
+        }
+        state.trail.push(tipAt(state.theta, state.K));
+      }
+    }
+
+    // earlier approximations fade behind the current one
+    state.ghosts.forEach((g, i) => strokeTrail(g, 1, COLOR.paper, 0.08 + 0.06 * i));
+    strokeTrail(state.trail, 6, COLOR.paper, 0.08);
+    strokeTrail(state.trail, 2.2, COLOR.paper, 0.95);
+    if (!state.holdUntil) drawEpicycles(state.theta, state.K);
+
+    const total = state.terms.length - 1;
+    readout.innerHTML = `圆 <b>${state.K}</b> / ${total}　·　${progressiveBox.checked ? `第 ${state.levelIdx + 1} / ${state.levels.length} 级` : `第 ${state.round} 圈`}`;
+    requestAnimationFrame(step);
+  }
+
+  // ---------- controls ----------
+  function selectShape(shape) {
+    state.shape = shape;
+    document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.shape === shape)));
+    textRow.hidden = shape !== 'text';
+    drawRow.hidden = shape !== 'draw';
+    resize();
+    if (shape === 'cat') load(samplePathD(CAT_PATH, 600));
+    else if (shape === 'heart') load(heartPoints(400));
+    else if (shape === 'star') load(starPoints());
+    else if (shape === 'text') drawText();
+    else if (shape === 'draw') { state.terms = []; state.trail = []; state.ghosts = []; readout.textContent = '等待你画一笔'; }
+  }
+
+  function drawText() {
+    const pts = textPoints(textInput.value.trim() || 'π');
+    if (pts) load(pts);
+    else readout.textContent = '这段文字没有可描的轮廓，换几个字试试';
+  }
+
+  document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => selectShape(c.dataset.shape)));
+  document.getElementById('textGo').addEventListener('click', drawText);
+  textInput.addEventListener('keydown', e => { if (e.key === 'Enter') drawText(); });
+  speedSlider.addEventListener('input', () => { speedOut.textContent = speedSlider.value + '×'; });
+  countSlider.addEventListener('input', () => {
+    if (progressiveBox.checked) return;
+    state.K = +countSlider.value;
+    updateCountOut();
+    state.trail = []; state.theta = 0; state.holdUntil = 0;
+  });
+  progressiveBox.addEventListener('change', () => {
+    if (!progressiveBox.checked) countSlider.value = countSlider.max;
+    state.ghosts = []; state.round = 1; startRound(true);
+  });
+
+  canvas.addEventListener('pointerdown', e => {
+    if (state.shape !== 'draw') return;
+    canvas.setPointerCapture(e.pointerId);
+    state.terms = []; state.ghosts = []; state.trail = [];
+    state.drawing = [[e.clientX, e.clientY]];
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!state.drawing) return;
+    const last = state.drawing[state.drawing.length - 1];
+    if (Math.hypot(e.clientX - last[0], e.clientY - last[1]) > 2) state.drawing.push([e.clientX, e.clientY]);
+  });
+  const endDraw = () => {
+    if (!state.drawing) return;
+    const raw = state.drawing;
+    state.drawing = null;
+    if (raw.length < 8) { readout.textContent = '这一笔太短了，再画长一点'; return; }
+    raw.push(raw[0]);  // close the loop so the series has no jump at the seam
+    load(resample(raw, 500));
+  };
+  canvas.addEventListener('pointerup', endDraw);
+  canvas.addEventListener('pointercancel', endDraw);
+
+  window.addEventListener('resize', resize);
+  if (reducedMotion) speedSlider.value = '2', speedOut.textContent = '2×';
+  resize();
+  selectShape('cat');
+  requestAnimationFrame(step);
+})();
+</script>
