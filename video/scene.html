@@ -103,7 +103,7 @@ function camera(f, P) {
   let Z = Math.max(1, halfFinal / Math.exp(cam.logE));
   // after the reveal, a slow push in
   if (f > F_CLIMAX + F_WAVE) Z *= 1 + 0.07 * smooth((f - F_CLIMAX - F_WAVE) / (F_END - F_CLIMAX - F_WAVE));
-  const w = Math.pow(clamp01(Math.log(Z) / Math.log(ZOOM0)), 0.6);
+  const w = smooth((Z - 1) / 0.8);                           // stay on the swirl until the last pull-back
   const [fx, fy] = META.focus;
   const cx = lerp(PW / 2, fx, w), cy = lerp(PH / 2, fy, w);
   return { Z, cx, cy };
@@ -175,6 +175,37 @@ function drawLines(f, P, view, phase) {
   }
 }
 
+function drawTail(f, P, view) {
+  const { Z, cx, cy } = view;
+  const speed = V0 * Math.exp(KR * Math.max(0, f - F_START));   // trail points per frame
+  const len = speed * 14;
+  const end = Math.floor(P), start = Math.max(0, Math.floor(P - len));
+  if (end - start < 2) return;
+  const stride = Math.max(1, Math.min(8, Math.floor(2.4 / (0.3 * Z))));
+  const ox = W / 2 - cx * Z, oy = H / 2 - cy * Z;
+  // three slices, fading toward the old end
+  const width = 1.25 * Math.pow(Z, 0.42);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.globalCompositeOperation = 'lighter';
+  for (let k = 0; k < 3; k++) {
+    const a = start + Math.floor((end - start) * k / 3), b = start + Math.floor((end - start) * (k + 1) / 3);
+    const path = new Path2D();
+    let open = false;
+    for (let i = a - (a % stride); i + stride <= b; i += stride) {
+      const j = i + stride;
+      if (UPC[j] - UPC[i] > 0) { open = false; continue; }
+      if (!open) { path.moveTo(TX[i] * Z + ox, TY[i] * Z + oy); open = true; }
+      path.lineTo(TX[j] * Z + ox, TY[j] * Z + oy);
+    }
+    ctx.globalAlpha = 0.25 + 0.3 * k;
+    ctx.strokeStyle = '#fff6e6';
+    ctx.lineWidth = width * 1.5;
+    ctx.stroke(path);
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
 function chainAt(theta) {
   // positions of every circle centre for parameter theta; returns Float64Array [x0,y0,x1,y1,...] and the tip
   const pts = new Float64Array(2 * (K + 1));
@@ -211,14 +242,21 @@ function drawEpicycles(chain, view, alpha, burst = 0) {
   const tipX = chain[2 * K] * Z + ox, tipY = chain[2 * K + 1] * Z + oy;
   ctx.lineWidth = 1;
   ctx.strokeStyle = '#bcd2ff';
-  ctx.globalAlpha = 0.08 * alpha;
+  ctx.globalAlpha = 0.1 * alpha;
   ctx.stroke(rings);
-  ctx.globalAlpha = 0.3 * alpha;
+  ctx.strokeStyle = '#000';
+  ctx.globalAlpha = 0.55 * alpha;
+  ctx.lineWidth = 4;
+  ctx.stroke(bigRings);
+  if (!burst) ctx.stroke(arms);
+  ctx.strokeStyle = '#e4ecff';
+  ctx.globalAlpha = 0.6 * alpha;
+  ctx.lineWidth = 1.4;
   ctx.stroke(bigRings);
   if (!burst) {
-    ctx.globalAlpha = 0.42 * alpha;
+    ctx.globalAlpha = 0.75 * alpha;
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.3;
     ctx.stroke(arms);
     const g = ctx.createRadialGradient(tipX, tipY, 0, tipX, tipY, 18);
     g.addColorStop(0, 'rgba(255,255,255,0.95)');
@@ -290,6 +328,7 @@ function renderFrame(f, draw = true) {
     if (tw > 0.3) phase.level = rippleLevel(f);
   }
   drawLines(f, P, view, phase);
+  if (f < F_CLIMAX) drawTail(f, P, view);
 
   // glow: steady while drawing, a surge at the climax, then a soft pulse with the ripples
   let glow = 0.7;
